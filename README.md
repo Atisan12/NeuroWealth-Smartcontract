@@ -605,3 +605,8 @@ buckets. `batch_deposit` is also bounded by `set_max_batch_size` (default 50
 entries). See [`ARCHITECTURE.md`](ARCHITECTURE.md) and
 [`SECURITY.md`](SECURITY.md) for defaults, storage, events, and operational
 guidance.
+
+## Handsoff notes
+
+<!-- handsoff-issue-431 -->
+- #431: [Smart contract] Define safe removal rules for assets with outstanding positions
