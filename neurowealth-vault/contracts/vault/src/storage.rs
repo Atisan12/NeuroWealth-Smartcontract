@@ -25,8 +25,22 @@ pub struct AssetBalance {
     pub decimals: u32,
 }
 
+/// Per-holder share accounting that separates locked from unlocked shares.
+///
+/// `unlocked` shares may be redeemed through any withdrawal entrypoint.
+/// `locked` shares are subject to a share lock and may only be released by an
+/// entrypoint that explicitly documents a lock bypass (emergency withdrawal).
+/// The total share balance of a holder is `unlocked + locked`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShareBalance {
+    pub unlocked: i128,
+    pub locked: i128,
+}
+
 const SUPPORTED_ASSETS_KEY: Symbol = Symbol::short("assets");
 const ASSET_BALANCES_KEY: Symbol = Symbol::short("balances");
+const SHARE_BALANCES_KEY: Symbol = Symbol::short("shares");
 
 fn supported_assets(env: &Env) -> Map<Address, AssetMetadata> {
     env.storage()
@@ -39,6 +53,13 @@ fn asset_balances(env: &Env) -> Map<Address, AssetBalance> {
     env.storage()
         .instance()
         .get(&ASSET_BALANCES_KEY)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+fn share_balances(env: &Env) -> Map<Address, ShareBalance> {
+    env.storage()
+        .instance()
+        .get(&SHARE_BALANCES_KEY)
         .unwrap_or_else(|| Map::new(env))
 }
 
@@ -138,4 +159,95 @@ pub fn set_asset_balance(
 
 pub fn get_asset_balance(env: &Env, token: &Address) -> Option<AssetBalance> {
     asset_balances(env).get(token.clone())
+}
+
+/// Read the split share balance for a holder. Missing entries are treated as
+/// zero shares so callers can reason about locked/unlocked uniformly.
+pub fn get_share_balance(env: &Env, holder: &Address) -> ShareBalance {
+    share_balances(env)
+        .get(holder.clone())
+        .unwrap_or(ShareBalance {
+            unlocked: 0,
+            locked: 0,
+        })
+}
+
+/// Persist the split share balance for a holder. Negative components are
+/// rejected so accounting cannot be corrupted by a bad caller.
+pub fn set_share_balance(
+    env: &Env,
+    holder: &Address,
+    balance: ShareBalance,
+) -> Result<(), VaultError> {
+    if balance.unlocked < 0 || balance.locked < 0 {
+        return Err(VaultError::InsufficientShares);
+    }
+    let mut balances = share_balances(env);
+    balances.set(holder.clone(), balance);
+    env.storage().instance().set(&SHARE_BALANCES_KEY, &balances);
+    Ok(())
+}
+
+/// Total shares (locked + unlocked) held by a holder.
+pub fn total_shares(env: &Env, holder: &Address) -> i128 {
+    let balance = get_share_balance(env, holder);
+    balance.unlocked + balance.locked
+}
+
+/// Shares that may be redeemed through a lock-respecting entrypoint
+/// (`withdraw`, `withdraw_all`, asset withdrawal, migration).
+pub fn unlocked_shares(env: &Env, holder: &Address) -> i128 {
+    get_share_balance(env, holder).unlocked
+}
+
+/// Shares that are subject to a share lock and may only be released by an
+/// entrypoint that explicitly documents a lock bypass (emergency withdrawal).
+pub fn locked_shares(env: &Env, holder: &Address) -> i128 {
+    get_share_balance(env, holder).locked
+}
+
+/// Deduct `amount` from the unlocked bucket only. Returns
+/// `InsufficientShares` when the unlocked balance cannot cover the request,
+/// even if locked shares would. This is the shared lock policy used by every
+/// lock-respecting withdrawal entrypoint.
+pub fn deduct_unlocked_shares(
+    env: &Env,
+    holder: &Address,
+    amount: i128,
+) -> Result<(), VaultError> {
+    if amount < 0 {
+        return Err(VaultError::InsufficientShares);
+    }
+    let mut balance = get_share_balance(env, holder);
+    if balance.unlocked < amount {
+        return Err(VaultError::InsufficientShares);
+    }
+    balance.unlocked -= amount;
+    set_share_balance(env, holder, balance)
+}
+
+/// Deduct `amount` from the unlocked bucket first, then from the locked bucket.
+/// This is the explicit emergency bypass: it is the only helper that may spend
+/// locked shares, and it is intended solely for the emergency withdrawal path.
+pub fn deduct_all_shares(
+    env: &Env,
+    holder: &Address,
+    amount: i128,
+) -> Result<(), VaultError> {
+    if amount < 0 {
+        return Err(VaultError::InsufficientShares);
+    }
+    let mut balance = get_share_balance(env, holder);
+    let total = balance.unlocked + balance.locked;
+    if total < amount {
+        return Err(VaultError::InsufficientShares);
+    }
+    let from_unlocked = if balance.unlocked < amount {
+        balance.unlocked
+    } else {
+        amount
+    };
+    balance.unlocked -= from_unlocked;
+    balance.locked -= amount - from_unlocked;
+    set_share_balance(env, holder, balance)
 }
