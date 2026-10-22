@@ -610,3 +610,6 @@ guidance.
 
 <!-- handsoff-issue-431 -->
 - #431: [Smart contract] Define safe removal rules for assets with outstanding positions
+
+<!-- handsoff-issue-432 -->
+- #432: [Smart contract] Review migration target validation and user authorization
